@@ -10,7 +10,7 @@ void read_life105(FILE *f,
                   void *cbdata) {
 
         char linebuff[10000];        
-        char parambuff[30];
+        char parambuff[50];
         char valuebuff[50];
         int gen, xpos, ypos, value;
         char area = 'P';
