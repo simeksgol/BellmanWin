@@ -7,21 +7,38 @@
 #include "readwrite.h"
 #include "bitwise.h"
 
-#define RECURSE(x) //printf x
-#define PRUNE(x) //printf x
-#define CHECK(x) //printf x
+#define PRINT_DIAGNOSTIC_RECURSE(x) //printf x
+#define PRINT_DIAGNOSTIC_PRUNE(x) //printf x
+#define PRINT_DIAGNOSTIC(x) //printf x
 #define YES 1
 #define NO 0
 
 static universe *u_static, *u_evolving, *u_forbidden, *u_filter;
 
-// Search space restriction parameters:
-static unsigned int first_encounter_gen = 2;
-static unsigned int last_encounter_gen = 20;
-static unsigned int repair_interval = 20;
-static unsigned int stable_interval = 5;
-static unsigned int max_live = 10;
-static unsigned int max_active = 10;
+
+// Search settings:
+#define DEFAULT_MIN_EXTRA_GENS_TO_ALLOW_REACTIVATION 12
+#define MAX_MAX_LOCAL_AREAS 16
+#define LOCAL_COMPLEXITY_FREE_CELLS 4
+#define GLOBAL_COMPLEXITY_FREE_CELLS 9
+
+static int explicit_max_reactivation_gen = NO;
+
+static unsigned int min_activation_gen = 2;
+static unsigned int max_first_activation_gen = 17;
+static unsigned int max_reactivation_gen = 17 + DEFAULT_MIN_EXTRA_GENS_TO_ALLOW_REACTIVATION;
+static unsigned int max_active_gens_in_a_row = 12;
+static unsigned int inactive_gens_at_accept	= 6;
+static unsigned int active_plus_inactive_gens_at_accept = 0;
+static unsigned int continue_after_accept = 0;
+static unsigned int max_added_static_oncells = 32;
+static unsigned int max_flipped_cells_in_activation = 8;
+static unsigned int max_local_complexity = 1023;
+static unsigned int max_local_areas = 1;
+static unsigned int min_local_area_separation_squared = 10;
+static unsigned int max_global_complexity = 1023;
+static unsigned int old_result_naming = 0;
+
 
 // Symmetry constraints
 static enum {
@@ -33,50 +50,108 @@ static unsigned int symmetry_ofs = 0;
 static unsigned int diagonal_x, diagonal_y;
 static unsigned int inverse_x, inverse_y;
 
-// Other global values
-static unsigned int max_gens;
-static unsigned int n_live;
 
+// Other global values
+static int dumpcount = 0;
+static int solcount = 0;
+static unsigned int max_gens;
+
+
+// List of currently added static on-cells
+#define ONLIST_SIZE 1024
+static int onlist_x [ONLIST_SIZE];
+static int onlist_y [ONLIST_SIZE];
+static int onlist_cnt = 0;
+
+
+// Status update values and prune counters
 static int last_print_time = 0;
 static int total_time = 0;
+static uint64_t prune_oldtotal = 0;
 
-// Prune counters
-static uint64_t prune_unstable;
-static uint64_t prune_solution;
-static uint64_t prune_encounter_too_early;
-static uint64_t prune_encounter_too_late;
-static uint64_t prune_stabilises_too_slowly;
-static uint64_t prune_too_many_active;
-static uint64_t prune_too_many_live;
-static uint64_t prune_forbidden;
-static uint64_t prune_filter;
-static uint64_t prune_oldtotal;
+static uint64_t prune_unstable = 0;
+static uint64_t prune_forbidden = 0;
+static uint64_t prune_filter = 0;
+static uint64_t prune_solution = 0;
+static uint64_t prune_no_continuation_found = 0;
+static uint64_t prune_first_activation_too_early = 0;
+static uint64_t prune_first_activation_too_late = 0;
+static uint64_t prune_reactivation_too_late = 0;
+static uint64_t prune_stayed_active_too_long = 0;
+static uint64_t prune_too_many_added_oncells = 0;
+static uint64_t prune_too_many_flipped_cells = 0;
+static uint64_t prune_too_complex_locally = 0;
+static uint64_t prune_too_complex_globally = 0;
+static uint64_t prune_new_oncells_not_allowed = 0;
+
+
+static int lowest_of (int arg1, int arg2)
+{
+	if (arg2 < arg1)
+		return arg2;
+	else
+		return arg1;
+}
+
+static int highest_of (int arg1, int arg2)
+{
+	if (arg2 > arg1)
+		return arg2;
+	else
+		return arg1;
+}
+
 
 #define PRINT_PRUNE(fmt, count) do {                            \
-                printf("   " fmt ": %lld\n", (long long)count); \
+                printf("    " fmt ": %lld\n", (long long)count); \
                 prune_total += count;                           \
         } while(0)
 
-static void print_prune_counters(void) {
-        uint64_t prune_total = 0;
+static void print_prune_counters(int force) {
 
-        printf("Reasons why search space was pruned:\n");
-        PRINT_PRUNE("Catalyst is unstable", prune_unstable);
-        PRINT_PRUNE("Found a solution", prune_solution);
-        PRINT_PRUNE("First encounter too early (first-encounter)", prune_encounter_too_early);
-        PRINT_PRUNE("First encounter too late (last-encounter)", prune_encounter_too_late);
-        PRINT_PRUNE("Took too long to stabilise (repair-interval)", prune_stabilises_too_slowly);
-        PRINT_PRUNE("Too many active cells (max-active)", prune_too_many_active);
-        PRINT_PRUNE("Too many live cells (max-live)", prune_too_many_live);
-        PRINT_PRUNE("Hit forbidden region", prune_forbidden);
-        PRINT_PRUNE("Filter mismatch", prune_filter);
-
-        double prune_rate = prune_total - prune_oldtotal;
-        prune_oldtotal = prune_total;
-
-        prune_rate = prune_rate / 10000.0;
-
-        printf("   Total: %lld (%f Kprunes/sec)\n", (long long)prune_total, prune_rate);        
+//    int stacksz = lowest_of (onlist_cnt, 8);
+//    
+//    printf ("First few added on-cells: ");
+//    int i;
+//    for (i = 0; i < stacksz; i++)
+//    {
+//      if (i > 0)
+//        printf (" ");
+//      printf ("%2d-%2d", onlist_x [i], onlist_y [i]);
+//    }
+//    printf ("\n");
+      
+		if (total_time || force)
+		{
+	        uint64_t prune_total = 0;
+			
+	        printf("  Reasons why search space was pruned:\n");
+    	    PRINT_PRUNE("Catalyst is unstable", prune_unstable);
+        	PRINT_PRUNE("Hit forbidden region", prune_forbidden);
+	        PRINT_PRUNE("Filter mismatch", prune_filter);
+			if (continue_after_accept)
+				PRINT_PRUNE("No continuation found", prune_no_continuation_found);
+			else
+	    	    PRINT_PRUNE("Found a solution", prune_solution);
+	        PRINT_PRUNE("First activation too early", prune_first_activation_too_early);
+    	    PRINT_PRUNE("First activation too late", prune_first_activation_too_late);
+        	PRINT_PRUNE("Reactivated too late", prune_reactivation_too_late);
+			PRINT_PRUNE("Stayed active too long", prune_stayed_active_too_long);
+    	    PRINT_PRUNE("Too many added on-cells", prune_too_many_added_oncells);
+        	PRINT_PRUNE("Too many flipped cells in activation", prune_too_many_flipped_cells);
+	        PRINT_PRUNE("Too complex locally", prune_too_complex_locally);
+    	    PRINT_PRUNE("Too complex globally", prune_too_complex_globally);
+    	    PRINT_PRUNE("New on-cells not allowed", prune_new_oncells_not_allowed);
+			
+	        double prune_rate = prune_total - prune_oldtotal;
+    	    prune_oldtotal = prune_total;
+			
+	        prune_rate = prune_rate / 10000.0;
+			
+	        printf("  Solutions: %d, prunes: %lld\n", solcount, (long long) prune_total);
+			if (total_time)
+				printf ("  Average: %.3f Kprunes/s, current: = %.3f Kprunes/s\n", (double) prune_total / (double) total_time / 10000.0, prune_rate);
+		}
 }
 
 
@@ -92,7 +167,10 @@ static void read_cb(void *u_, char area, int gen, int x, int y, char c) {
                 case '*': vs = ve = ON; break;
                 case '@': ve = ON; break;
                 case '?': vs = ve = UNKNOWN_STABLE; break;
-                case '!': vs = ve = UNKNOWN_STABLE; vf = ON; break;
+
+// Test to have forbidden as a type of off-cell instead
+//                case '!': vs = ve = UNKNOWN_STABLE; vf = ON; break;
+                case '!': vf = ON; break;
                 }
 
                 generation_set_cell(u_static->first, x, y, vs);
@@ -114,31 +192,57 @@ static void read_cb(void *u_, char area, int gen, int x, int y, char c) {
         }
 }
 
+static int match_parameter (const char *match, const char *param, const char *valuein, int addtovalue, unsigned int minvalue, unsigned int maxvalue, unsigned int *valueout)
+{
+	if (strcmp (match, param) != 0)
+		return NO;
+
+	unsigned int value = strtoul (valuein, NULL, 10);
+	if (value < minvalue || value > maxvalue)
+	{
+		fprintf (stderr, "Legal range for parameter '%s' is %d to %d\n", match, minvalue, maxvalue);
+		exit (-1);
+	}
+	
+	*valueout = value + addtovalue;
+	return YES;
+}
+
 static void read_param_cb(void *u_, const char *param, const char *value) {
         (void)u_;
-		char typebuff[20];
-        unsigned int coord;
-        
-				
-        if(!strcmp(param, "first-encounter"))
-                first_encounter_gen = strtoul(value, NULL, 10);
-
-        else if(!strcmp(param, "last-encounter"))
-                last_encounter_gen = strtoul(value, NULL, 10);
-
-        else if(!strcmp(param, "repair-interval"))
-                repair_interval = strtoul(value, NULL, 10);
-
-        else if(!strcmp(param, "stable-interval"))
-                stable_interval = strtoul(value, NULL, 10);
-
-        else if(!strcmp(param, "max-live"))
-                max_live = strtoul(value, NULL, 10);
-
-        else if(!strcmp(param, "max-active"))
-                max_active = strtoul(value, NULL, 10);
-
-        else if(!strcmp(param, "symmetry-horiz-odd")) {
+        int match = NO;
+		unsigned int coord;
+		
+		// Backward compatibility with traditional parameters
+		// Value of repair-interval and stable-interval is incremented by one for the new definition of max-active-gens-in-a-row and inactive-gens-at-accept
+        match |= match_parameter ("first-encounter", param, value, 0, 0, 1023, &min_activation_gen);
+        match |= match_parameter ("last-encounter", param, value, 0, 0, 1023, &max_first_activation_gen);
+        match |= match_parameter ("repair-interval", param, value, 1, 1 - 1, 1023 - 1, &max_active_gens_in_a_row);
+        match |= match_parameter ("stable-interval", param, value, 1, 1 - 1, 1023 - 1, &inactive_gens_at_accept);
+        match |= match_parameter ("max-live", param, value, 1, 0, 1023, &max_added_static_oncells);
+        match |= match_parameter ("max-active", param, value, 1, 0, 1023, &max_flipped_cells_in_activation);
+		
+		// New style parameters
+        match |= match_parameter ("min-activation-gen", param, value, 0, 0, 1023, &min_activation_gen);
+        match |= match_parameter ("max-first-activation-gen", param, value, 0, 0, 1023, &max_first_activation_gen);
+        if (match_parameter ("max-reactivation-gen", param, value, 0, 0, 1023, &max_reactivation_gen))
+		{
+			match = YES;
+			explicit_max_reactivation_gen = YES;
+		}
+        match |= match_parameter ("max-active-gens-in-a-row", param, value, 0, 1, 1023, &max_active_gens_in_a_row);
+        match |= match_parameter ("inactive-gens-at-accept", param, value, 0, 1, 1023, &inactive_gens_at_accept);
+        match |= match_parameter ("active-plus-inactive-gens-at-accept", param, value, 0, 0, 1023, &active_plus_inactive_gens_at_accept);
+        match |= match_parameter ("continue-after-accept", param, value, 0, 0, 1, &continue_after_accept);
+        match |= match_parameter ("max-added-static-oncells", param, value, 0, 0, 1023, &max_added_static_oncells);
+        match |= match_parameter ("max-flipped-cells-in-activation", param, value, 0, 0, 1023, &max_flipped_cells_in_activation);
+        match |= match_parameter ("max-local-complexity", param, value, 0, 0, 1023, &max_local_complexity);
+        match |= match_parameter ("max-local-areas", param, value, 0, 1, MAX_MAX_LOCAL_AREAS, &max_local_areas);
+        match |= match_parameter ("min-local-area-separation-squared", param, value, 0, 0, 8191, &min_local_area_separation_squared);
+        match |= match_parameter ("max-global-complexity", param, value, 0, 0, 1023, &max_global_complexity);
+        match |= match_parameter ("old-result-naming", param, value, 0, 0, 1, &old_result_naming);
+		
+        if(!strcmp(param, "symmetry-horiz-odd")) {
                  coord = strtoul(value, NULL, 10);
 				 symmetry_type = HORIZ;
                  symmetry_ofs = (coord * 2);
@@ -161,27 +265,34 @@ static void read_param_cb(void *u_, const char *param, const char *value) {
                  symmetry_ofs = (coord * 2) + 1;
              }
 		 else if(!strcmp(param, "symmetry-diag")) {
+				fprintf (stderr, "Symmetry type 'symmetry-diag' is not implemented!\n");
+				exit (-1);
 				
-				if(sscanf(value, "%d %d", &diagonal_x, &diagonal_y) != 2) {
-                      fprintf(stderr, "Bad symmetry parameter: '%s'\n", value);
-                        exit(-1);
-				}
-				
-				 symmetry_type = DIAG;
+//				if(sscanf(value, "%d %d", &diagonal_x, &diagonal_y) != 2) {
+//                      fprintf(stderr, "Bad symmetry parameter: '%s'\n", value);
+//                        exit(-1);
+//				}
+//				
+//				 symmetry_type = DIAG;
              }		
 
          else if(!strcmp(param, "symmetry-diag-inverse")) {
+				fprintf (stderr, "Symmetry type 'symmetry-diag-inverse' is not implemented!\n");
+				exit (-1);
 				
-				if(sscanf(value, "%d %d", &inverse_x, &inverse_y) != 2) {
-                      fprintf(stderr, "Bad symmetry parameter: '%s'\n", value);
-                        exit(-1);
-				}
-				
-				 symmetry_type = DIAG_INVERSE;
+//				if(sscanf(value, "%d %d", &inverse_x, &inverse_y) != 2) {
+//                      fprintf(stderr, "Bad symmetry parameter: '%s'\n", value);
+//                        exit(-1);
+//				}
+//				
+//				 symmetry_type = DIAG_INVERSE;
              }		
 
-        else fprintf(stderr, "Bad parameter: '%s' (%s)\n",
-                     param, value);
+        else if (!match)
+		{
+			fprintf(stderr, "Unknown parameter: '%s'\n", param);
+			exit (-1);
+		}
 }
 
 
@@ -420,32 +531,32 @@ static evolve_result bellman_evolve(tile *t, tile *out) {
                 filter_diff &= ~(filter_bit1 | out->bit1[y]);
                 filter_diff_all |= filter_diff;
 #if 0
-                if(filter_bit1 != ~0) {
-                        printf("f%d: %16llx/%16llx\n", y, filter_bit0 & ~filter_bit1, filter_bit1);
-                        printf("o%d: %16llx/%16llx\n", y, out->bit0[y] & ~filter_bit1, out->bit1[y] & ~filter_bit1);
-                        printf("d%d: %16llx\n", y, filter_diff);
-                }
+//                if(filter_bit1 != ~0) {
+//                        printf("f%d: %16llx/%16llx\n", y, filter_bit0 & ~filter_bit1, filter_bit1);
+//                        printf("o%d: %16llx/%16llx\n", y, out->bit0[y] & ~filter_bit1, out->bit1[y] & ~filter_bit1);
+//                        printf("d%d: %16llx\n", y, filter_diff);
+//                }
 #endif
 #if 0
-                int x;
-                for(x=0; x<TILE_WIDTH; x++) {
-                        int cb0 = (neigh_total0 >> x) & 1;
-                        int cb1 = (neigh_total1 >> x) & 1;
-                        int cb2 = (neigh_total2 >> x) & 1;
-                        int cb3 = (neigh_total3 >> x) & 1;
-                        int ub0 = (neigh_unk_total0 >> x) & 1;
-                        int ub1 = (neigh_unk_total1 >> x) & 1;
-                        int ub2 = (neigh_unk_total2 >> x) & 1;
-                        int ub3 = (neigh_unk_total3 >> x) & 1;
-                        int v = (mid >> x) & 1;
-                        v += ((mid_unk >> x) & 1) << 1;
-                        int nv = (is_live >> x) & 1;
-                        nv += ((is_unk >> x) & 1) << 1;
-                        printf("%d, %d: v=%d, count=%d, unk=%d, new=%d, abort %x\n",
-                               x, y, v, (cb3 * 8) + (cb2 * 4) + (cb1 * 2) + cb0,
-                               (ub3 * 8) + (ub2 * 4) + (ub1 * 2) + ub0, nv, abort);
-
-                }
+//                int x;
+//                for(x=0; x<TILE_WIDTH; x++) {
+//                        int cb0 = (neigh_total0 >> x) & 1;
+//                        int cb1 = (neigh_total1 >> x) & 1;
+//                        int cb2 = (neigh_total2 >> x) & 1;
+//                        int cb3 = (neigh_total3 >> x) & 1;
+//                        int ub0 = (neigh_unk_total0 >> x) & 1;
+//                        int ub1 = (neigh_unk_total1 >> x) & 1;
+//                        int ub2 = (neigh_unk_total2 >> x) & 1;
+//                        int ub3 = (neigh_unk_total3 >> x) & 1;
+//                        int v = (mid >> x) & 1;
+//                        v += ((mid_unk >> x) & 1) << 1;
+//                        int nv = (is_live >> x) & 1;
+//                        nv += ((is_unk >> x) & 1) << 1;
+//                        printf("%d, %d: v=%d, count=%d, unk=%d, new=%d, abort %x\n",
+//                               x, y, v, (cb3 * 8) + (cb2 * 4) + (cb1 * 2) + cb0,
+//                               (ub3 * 8) + (ub2 * 4) + (ub1 * 2) + ub0, nv, abort);
+//
+//                }
 #endif
 			}
 			else
@@ -508,8 +619,6 @@ static generation *bellman_evolve_generations(generation *g, unsigned int end) {
         return g->prev;
 }
 
-static int dumpcount = 0;
-
 static void dump(int full, unsigned int gen_nr) {
 
         char name[30];
@@ -527,27 +636,37 @@ static void dump(int full, unsigned int gen_nr) {
         dumpcount++;
 }
 
-static int solcount = 0;
-
-static void bellman_found_solution(const char *type, unsigned int gens) {
+static void bellman_found_solution(unsigned int gens) {
         solcount++;
-        printf("Found solution %d type %s, gens %d\n", solcount, type, gens);
+        printf("--- Found solution %d, accepted at gen %d ---\n", solcount, gens);
 
         char name[30];
 
         unsigned int i;
 		tile *t;
 		
-        snprintf(name, sizeof name, "result%06d-%s.out", solcount, type);
+		if (old_result_naming)
+	        snprintf(name, sizeof name, "result%06d-4.out", solcount);
+		else
+	        snprintf(name, sizeof name, "result%06d.out", solcount);
+		
         FILE *f = fopen(name, "w");
         if(f) {
-                fprintf(f, "#S first-encounter %d\n", first_encounter_gen);
-                fprintf(f, "#S last-encounter %d\n", last_encounter_gen);
-                fprintf(f, "#S repair-interval %d\n", repair_interval);
-                fprintf(f, "#S stable-interval %d\n", stable_interval);
-                fprintf(f, "#S max-live %d\n", max_live);
-                fprintf(f, "#S max-active %d\n", max_active);
 
+				fprintf(f, "#S min-activation-gen %d\n", min_activation_gen);
+				fprintf(f, "#S max-first-activation-gen %d\n", max_first_activation_gen);
+				fprintf(f, "#S max-reactivation-gen %d\n", max_reactivation_gen);
+				fprintf(f, "#S max-active-gens-in-a-row %d\n", max_active_gens_in_a_row);
+				fprintf(f, "#S inactive-gens-at-accept %d\n", inactive_gens_at_accept);
+				fprintf(f, "#S active-plus-inactive-gens-at-accept %d\n", active_plus_inactive_gens_at_accept);
+				fprintf(f, "#S continue-after-accept %d\n", continue_after_accept);
+				fprintf(f, "#S max-added-static-oncells %d\n", max_added_static_oncells);
+				fprintf(f, "#S max-flipped-cells-in-activation %d\n", max_flipped_cells_in_activation);
+				fprintf(f, "#S max-local-complexity %d\n", max_local_complexity);
+				fprintf(f, "#S max-local-areas %d\n", max_local_areas);
+				fprintf(f, "#S min-local-area-separation-squared %d\n", min_local_area_separation_squared);
+				fprintf(f, "#S max-global-complexity %d\n", max_global_complexity);
+				fprintf(f, "#C Solution accepted at generation %d\n", gens);
 
                 for(t = u_static->first->all_first; t; t = t->all_next) {
                         tile *t2 = universe_find_tile(u_evolving, 0, t->xpos, t->ypos, 0);
@@ -578,33 +697,31 @@ static void bellman_found_solution(const char *type, unsigned int gens) {
         } else perror(name);
 }
 
-static int all_static_unknown(generation *ufirst, generation *ge)
+static int verify_static_is_stable ()
 {
-	 tile *t, *tge;
-	 tge = ge->all_first;
-	 int y; 
-	for(t = ufirst->all_first; t; t = t->all_next) {
-		
-		for(y=0; y<TILE_HEIGHT; y++) {
-				
-			if((~tge->bit1[y] & t->bit1[y] & t->bit0[y]) != 0)
-				return NO;
-		}
-		
-		tge = tge->all_next;
+	// TODO: check only the neighbourhood of the cell we just modified!
+
+ 	tile *t;
+	for(t = u_static->first->all_first; t; t = t->all_next)
+	{
+		evolve_result res = tile_stabilise_3state (t, t->next);
+        if (res & ABORT)
+			return NO;
 	}
 	
 	return YES;
 }
 
-static void bellman_choose_cells(universe *u, generation *g);
+// Forward declaration to allow mutual calls between bellman_choose_cells and bellman_recurse
+static void bellman_choose_cells (universe *u, generation *g, int allow_new_oncells, int first_gen_with_unknown_cells, int first_next_sol_gen);
 
-static void bellman_recurse(universe *u, generation *g) {
+static void bellman_recurse (universe *u, generation *g, int previous_first_gen_with_unknown_cells, int first_next_sol_gen)
+{
 
 		int t_now = time(NULL);
-        if((t_now - last_print_time) > 10) {
+        if((t_now - last_print_time) >= 10) {
 		        last_print_time = t_now;
-                print_prune_counters();
+                print_prune_counters(NO);
 				total_time++;
 				
 				if(total_time % 6 == 0)
@@ -612,155 +729,174 @@ static void bellman_recurse(universe *u, generation *g) {
         }
 
         // First make sure the static pattern is truly static
-
-        // TODO: check only the neighbourhood of the cell we just
-        // modified!
-
-        tile *t;
-        for(t = u_static->first->all_first; t; t = t->all_next) {
-                evolve_result res = tile_stabilise_3state(t, t->next);
-           
-                if(res & ABORT) {
-                        PRUNE(("Stable world is unstable\n"));
-                        prune_unstable++;
-                        return;
-                }
-        }
+		// Note that both a new static on-cell and a new static off-cell can cause the static pattern to become impossible to make stable
+		if (!verify_static_is_stable ())
+		{
+			prune_unstable++;
+           	PRINT_DIAGNOSTIC_PRUNE(("Stable world is unstable\n"));
+			return;
+		}
 
         // Now check that the evolving universe is behaving itself
         generation *ge;
         evolve_result all_gens = 0;
-        int first_active_gen = 0;
-        int changed = 0;
+
+        int first_active_gen = -1;
 		int stabilized = NO; 
-		int stabilized_gen = -1; 
+		int stabilized_gen = -1;
+		int stabilization_yielded = NO;
 		
-        for(ge = u->first; ge && ge->next; ge = ge->next) {
-                if(ge->flags & CHANGED) {
-                        changed = 1;
-                        ge->flags &= ~CHANGED;
-                }
-
-                if(changed) {
-                        CHECK(("Evolving generation %d\n", ge->next->gen));
-                        generation_evolve(ge, bellman_evolve);
-
+		
+		// First check that we got at least one generation further than in the previous recursion level
+        for(ge = u->first; ge && ge->next; ge = ge->next)
+		{
+        	if(ge->flags & CHANGED)
+			{
+            	ge->flags &= ~CHANGED;
+				PRINT_DIAGNOSTIC(("Evolving generation %d\n", ge->next->gen));
+				generation_evolve(ge, bellman_evolve);
+			}
+			
+			if (ge->gen == previous_first_gen_with_unknown_cells)
+				break;
+		}
+		
+		if (!(ge->flags & HAS_UNKNOWN_CELLS))
+	        for(ge = u->first; ge && ge->next; ge = ge->next)
+			{
+                if(ge->flags & CHANGED)
+				{
+                	ge->flags &= ~CHANGED;
+					PRINT_DIAGNOSTIC(("Evolving generation %d\n", ge->next->gen));
+					generation_evolve(ge, bellman_evolve);
                 }
 				
-				//write_life105(stdout, ge);
-				//getchar();
+//				write_life105(stdout, ge);
+//				getchar();
 						
                 all_gens |= ge->flags;
+				
+				// We handle only generations without unknown cells, this gives more prunes, but seems faster nonetheless
+				if(ge->flags & HAS_UNKNOWN_CELLS)
+					break;
+				
+				// Test for too much activity first, for performance
+                if(ge->n_active > max_flipped_cells_in_activation) {
+                        PRINT_DIAGNOSTIC_PRUNE(("Too much activity at generation %d\n", ge->gen));
+                        prune_too_many_flipped_cells++;
+                        return;
+                }
 
-                if((first_active_gen == 0) && (ge->flags & DIFFERS_FROM_STABLE))
+				// Check if first activation should have happened by now
+				if (first_active_gen == -1 && ge->gen > max_first_activation_gen)
+				{
+					PRINT_DIAGNOSTIC_PRUNE(("No activity before generation %d\n", last_encounter_gen));
+					prune_first_activation_too_late++;
+					return;                        
+				}
+				
+				// Check for first activation
+				// Verify that it doesn't happen too early
+                if (first_active_gen == -1 && (ge->flags & DIFFERS_FROM_STABLE))
+	                if (ge->gen < min_activation_gen)
+					{
+						PRINT_DIAGNOSTIC_PRUNE(("Activity before generation %d\n", min_activation_gen));
+						prune_first_activation_too_early++;
+						return;                        
+					}
+					else					
                         first_active_gen = ge->gen;
 				
-				//stabilized flag is set to handle secondary destabilization.
-				if(first_active_gen > 0 && ge->n_active == 0 && stabilized == NO)
+				// Check for first inactive generation after an ongoing activation
+				// stabilized flag is set to handle possible future reactivation
+				if(first_active_gen >= 0 && ge->n_active == 0 && !stabilized)
 				{
 					stabilized = YES;
 					stabilized_gen = ge->gen;
+					stabilization_yielded = NO;
 				}
 				
-				//If stabilized and destabilized again, before reaching stable_interval,
-				//then first_active_gen will be set to the new active generation. 
-				if((stabilized == YES) && (ge->flags & DIFFERS_FROM_STABLE))
-                {
-					first_active_gen = ge->gen;
-					stabilized = NO;
-				}
+				// Check for reactivation. This could be before the previous activation was accepted as a solution, or it could be a search for further solutions if
+				// continue_after_accept is set. first_active_gen is reused to mean the first generation of the new activation
+				if(stabilized && (ge->flags & DIFFERS_FROM_STABLE))
+					if (ge->gen > max_reactivation_gen)
+					{
+						prune_reactivation_too_late++;
+						return;
+					}
+					else
+	                {
+						first_active_gen = ge->gen;
+						stabilized = NO;
+						stabilization_yielded = NO;
+					}
 				
-                CHECK(("Checking generation %d, flags %x all %x first_active_gen %d n_active %d changed %d\n", 
+                PRINT_DIAGNOSTIC(("Checking generation %d, flags %x all %x first_active_gen %d n_active %d changed %d\n", 
                        ge->gen, ge->flags, all_gens, first_active_gen, ge->n_active, changed));
 
                 if(ge->flags & FILTER_MISMATCH) {
-                        PRUNE(("Didn't match filter\n"));
+                        PRINT_DIAGNOSTIC_PRUNE(("Didn't match filter\n"));
                         //dump(1, 0);
                         prune_filter++;
                         return;
                 }
 
                 if(ge->flags & IN_FORBIDDEN_REGION) {
-                        PRUNE(("Hit forbidden region\n"));
+                        PRINT_DIAGNOSTIC_PRUNE(("Hit forbidden region\n"));
                         prune_forbidden++;
                         return;
                 }
 
-                // No activity is allowed prior to a point
-                if(ge->gen < first_encounter_gen) {
-                        if(ge->flags & DIFFERS_FROM_STABLE) {
-                                PRUNE(("Activity before generation %d\n", first_encounter_gen));
-                                prune_encounter_too_early++;
-                                return;                        
-                        }
-                }
-                
-				if(!(ge->flags & HAS_ON_CELLS) && (ge->flags & HAS_UNKNOWN_CELLS))
-					break;
-				
-				if(stabilized == NO && all_static_unknown(u->first, ge) == YES && (ge->flags & HAS_UNKNOWN_CELLS))
-					break;
-				
-
-                if(last_encounter_gen && (ge->gen >= last_encounter_gen)) {
-                        if(!(all_gens & DIFFERS_FROM_STABLE) && !(ge->flags & HAS_UNKNOWN_CELLS)) {
-                                PRUNE(("No activity before generation %d\n", last_encounter_gen));
-                                prune_encounter_too_late++;
-                                return;                        
-                        }
-                }
-
-                if((first_active_gen > 0) && (ge->gen > first_active_gen + repair_interval)) {
-                        // We reached the end of the repair interval;
-                        // now the pattern must remain stable
-
-                        if(ge->n_active > 0) {
-                                PRUNE(("Activity after generation %d\n", first_active_gen + repair_interval));
-                                prune_stabilises_too_slowly++;
-                                return;
-                        }
-                }
-
-                if((stabilized == YES) && (ge->gen >= stabilized_gen + stable_interval) && (ge->gen >= (u_filter->n_gens - 1))) {
-                        // We reached the end of the stable interval;
-                        // we may have a solution
-
-                        if(!(ge->flags & HAS_UNKNOWN_CELLS)) {
-                                bellman_found_solution("4", ge->gen);
-                                //dump(1, 0);
-                                PRUNE(("found a solution\n"));
-                                prune_solution++;
-                                return;
-                        } else {
-                                break;
-                        }
-                }
-
-                if(ge->n_active > max_active) {
-                        PRUNE(("Too much activity at generation %d\n", ge->gen));
-                        prune_too_many_active++;
+				// Check if an ongoing activation has lasted too long without break
+                if((first_active_gen >= 0) && (ge->gen >= first_active_gen + max_active_gens_in_a_row)) {
+                	if(ge->n_active > 0) {
+                    	PRINT_DIAGNOSTIC_PRUNE(("Activity after generation %d\n", first_active_gen + repair_interval));
+                		prune_stayed_active_too_long++;
                         return;
+                	}
                 }
-#if 0
-                if((ge->gen == first_activity) && !(all_gens & DIFFERS_FROM_STABLE) && !(ge->flags & HAS_UNKNOWN_CELLS)) {
-                        PRUNE(("No activity at generation %d\n", first_activity));
-                        //dump(1, 0);
-                        return;
-                }
-#endif
-                //printf("First activity %d, checking %d\n", first_activity, ge->gen);
-#if 0
-                if(ge->gen >= first_activity + repair_interval - 1) {
-                        if(ge->flags & HAS_ACTIVE_SUCCESSORS) {
-                                PRUNE(("Activity after generation %d\n", first_activity + repair_interval));
-                                        return;
-                        }
-                }
-#endif
-        }
-        //dump(1, 0);
 
-        bellman_choose_cells(u, g);
+				// Check if all conditions for a solution are met
+				if (stabilized && !stabilization_yielded)
+				{
+					int accept_gen = stabilized_gen + inactive_gens_at_accept - 1;
+					
+					if (active_plus_inactive_gens_at_accept)
+						accept_gen = lowest_of (accept_gen, first_active_gen + active_plus_inactive_gens_at_accept - 1);
+					
+					accept_gen = highest_of (accept_gen, u_filter->n_gens - 1);
+                	
+					if (ge->gen >= accept_gen)
+						stabilization_yielded = YES;
+					
+					if (ge->gen == accept_gen && ge->gen >= first_next_sol_gen)
+					{
+						bellman_found_solution (ge->gen);
+						// dump (1, 0);
+          	            	        
+						if (continue_after_accept)
+							first_next_sol_gen = ge->gen + 1;
+						else
+						{
+							PRINT_DIAGNOSTIC_PRUNE (("found a solution\n"));
+							prune_solution++;
+							return;
+						}
+					}
+				}
+				
+				// Check if we can stop looking for a solution in continue_after_accept mode
+				if (ge->gen > max_reactivation_gen && stabilized && stabilization_yielded)
+				{
+					prune_no_continuation_found++;
+					return;
+				}
+        	}
+
+//		dump(1, 0);
+		
+		int allow_new_oncells = (ge->gen <= max_reactivation_gen || !stabilized);
+        bellman_choose_cells(u, g, allow_new_oncells, ge->gen, first_next_sol_gen);
 }
 
 #define TRY(cdx, cdy)                                                   \
@@ -818,7 +954,120 @@ static int xy_symmetry(int x, int y, int* mirrorx_arr, int* mirrory_arr)
 	}
 }
 
-static void bellman_choose_cells(universe *u, generation *g) {
+
+typedef enum {COMPLEXITY_OK, COMPLEXITY_FAILED_LOCALLY, COMPLEXITY_FAILED_GLOBALLY} compl_result;
+
+typedef struct
+{
+	int xon;
+	int xoff;
+	int yon;
+	int yoff;
+	int oncnt;
+} compl_box;
+
+static int init_compl_box (compl_box *cb)
+{
+	cb->xon = 0;
+	cb->xoff = -1;
+	cb->yon = 0;
+	cb->yoff = -1;
+	cb->oncnt = 0;
+}
+
+static int try_add_to_box (compl_box *cb, int x, int y, int compl_limit, int free_cells)
+{
+	int new_xon = cb->xon;
+	int new_xoff = cb->xoff;
+	int new_yon = cb->yon;
+	int new_yoff = cb->yoff;
+	int new_oncnt = cb->oncnt + 1;
+	
+	if (new_xon > new_xoff)
+	{
+		new_xon = x;
+		new_xoff = x + 1;
+	}
+	else
+	{
+		if (new_xon > x)
+			new_xon = x;
+		if (new_xoff < x + 1)
+			new_xoff = x + 1;
+	}
+
+	if (new_yon > new_yoff)
+	{
+		new_yon = y;
+		new_yoff = y + 1;
+	}
+	else
+	{
+		if (new_yon > y)
+			new_yon = y;
+		if (new_yoff < y + 1)
+			new_yoff = y + 1;
+	}
+	
+	int compl = new_oncnt - free_cells;
+	if (compl < 0)
+		compl = 0;
+            
+	int bigside = new_xoff - new_xon;
+	int shortside = new_yoff - new_yon;
+	if (bigside < shortside)
+	{
+		bigside = new_yoff - new_yon;
+		shortside = new_xoff - new_xon;
+	}
+	
+	compl += (2 * bigside + shortside);
+	
+	if (compl <= compl_limit)
+	{
+		cb->xon = new_xon;
+		cb->xoff = new_xoff;
+		cb->yon = new_yon;
+		cb->yoff = new_yoff;
+		cb->oncnt = new_oncnt;
+		return YES;
+	}
+	
+	return NO;
+}
+
+static compl_result test_complexity ()
+{
+	compl_box local_box [MAX_MAX_LOCAL_AREAS];
+	
+	int box_ix;
+	for (box_ix = 0; box_ix < max_local_areas; box_ix++)
+		init_compl_box (&local_box [box_ix]);
+
+	int oncell_ix;
+	for (oncell_ix = 0; oncell_ix < onlist_cnt; oncell_ix++)
+	{
+		for (box_ix = 0; box_ix < max_local_areas; box_ix++)
+			if (try_add_to_box (&local_box [box_ix], onlist_x [oncell_ix], onlist_y [oncell_ix], max_local_complexity, LOCAL_COMPLEXITY_FREE_CELLS))
+				break;
+		
+		if (box_ix == max_local_areas)
+			return COMPLEXITY_FAILED_LOCALLY;
+	}
+
+	compl_box global_box;
+	init_compl_box (&global_box);
+
+	for (oncell_ix = 0; oncell_ix < onlist_cnt; oncell_ix++)
+		if (!try_add_to_box (&global_box, onlist_x [oncell_ix], onlist_y [oncell_ix], max_global_complexity, GLOBAL_COMPLEXITY_FREE_CELLS))
+			return COMPLEXITY_FAILED_GLOBALLY;
+	
+	return COMPLEXITY_OK;
+}
+
+
+static void bellman_choose_cells (universe *u, generation *g, int allow_new_oncells, int first_gen_with_unknown_cells, int first_next_sol_gen)
+{
         // Look for a tile with some unknown cells.
 
         g = u_evolving->first;
@@ -832,13 +1081,13 @@ static void bellman_choose_cells(universe *u, generation *g) {
                 if(!t) g = g->next;
         } while(g && !t);
 
-        if(!g) {
-                // We got all the way to the end of the pattern.
-                bellman_found_solution("1", max_gens);
-                //dump(1, 0);
-                PRUNE(("found a solution\n"));
-                prune_solution++;
-                return;
+        if(!g)
+		{
+			// We got all the way to the end of the pattern. This should not happen anymore - all
+			// solutions should be found before here and anything else should already be pruned
+			
+			fprintf (stderr, "Error: max generations reached without a solution or prune");
+			assert (0);
         }
 
         // Find an unknown successor cell that's in the neighbourhood
@@ -940,8 +1189,7 @@ found:
 	assert(tile_get_cell(t->prev, x+dx, y+dy) == UNKNOWN_STABLE);
 	assert(tile_get_cell((tile *)t->auxdata, x+dx, y+dy) == UNKNOWN_STABLE);
 	
-	RECURSE(("Generation %d, unknown cell at (%d, %d, %d)\n",
-			 g->gen, g->gen + 1, x+dx, y+dy));
+	PRINT_DIAGNOSTIC_RECURSE(("Generation %d, unknown cell at (%d, %d, %d)\n", g->gen, g->gen + 1, x+dx, y+dy));
 	assert(dx <= 1);
 	assert(dy <= 1);
 	x += dx;
@@ -961,31 +1209,60 @@ found:
 	}
 	
 #if 0
-		tile_set_cell(t->prev, x, y, OFF);
-		tile_set_cell(t->auxdata, x, y, OFF);
-		g->prev->flags |= CHANGED;
-
-		RECURSE(("Recursing with (%d,%d) = OFF\n", x, y));
-		bellman_recurse(u, g->prev);
+//		tile_set_cell(t->prev, x, y, OFF);
+//		tile_set_cell(t->auxdata, x, y, OFF);
+//		g->prev->flags |= CHANGED;
+//
+//		PRINT_DIAGNOSTIC_RECURSE(("Recursing with (%d,%d) = OFF\n", x, y));
+//		bellman_recurse(u, g->prev);
 #endif
 		
-		if(n_live + n_sym <= max_live) {
-			for(i = 0; i < n_sym; i++){
-				tile_set_cell(t->prev,  xmirror[i], ymirror[i], ON);
-				tile_set_cell((tile *)t->auxdata,  xmirror[i], ymirror[i], ON);
-			}
-			
-			g->prev->flags |= CHANGED;
-			RECURSE(("Recursing with (%d,%d) = ON\n", x, y));
+		// Recurse with the selected cell as ON
+		if (allow_new_oncells)
+		{
+			if(onlist_cnt + n_sym <= max_added_static_oncells) {
+    	        if (onlist_cnt + n_sym > ONLIST_SIZE)
+				{
+					printf("On-cell list overflow\n");
+					assert(0);
+				}
 				
-			n_live+=n_sym;
-				bellman_recurse(u, g->prev);
-			n_live-=n_sym;
-		} else { 
-				PRUNE(("Too many live cells\n"));
-				prune_too_many_live++;
+				for(i = 0; i < n_sym; i++)
+				{
+					onlist_x [onlist_cnt] = xmirror [i];
+					onlist_y [onlist_cnt] = ymirror [i];
+        	    	onlist_cnt++;
+				}
+			
+				compl_result cr = test_complexity ();
+				if (cr == COMPLEXITY_OK)
+				{
+					for(i = 0; i < n_sym; i++){
+						tile_set_cell(t->prev,  xmirror[i], ymirror[i], ON);
+						tile_set_cell((tile *)t->auxdata,  xmirror[i], ymirror[i], ON);
+					}
+				
+					g->prev->flags |= CHANGED;
+				
+					PRINT_DIAGNOSTIC_RECURSE(("Recursing with (%d,%d) = ON\n", x, y));
+					bellman_recurse(u, g->prev, first_gen_with_unknown_cells, first_next_sol_gen);
+				}
+	            else if (cr == COMPLEXITY_FAILED_LOCALLY)
+    	        	prune_too_complex_locally++;
+        	    else if (cr == COMPLEXITY_FAILED_GLOBALLY)
+            		prune_too_complex_globally++;
+				
+	            onlist_cnt -= n_sym;
+				
+			} else { 
+				PRINT_DIAGNOSTIC_PRUNE(("Too many live cells\n"));
+				prune_too_many_added_oncells++;
+			}
 		}
-#if 1
+		else
+			prune_new_oncells_not_allowed++;
+		
+		// Recurse with the selected cell as OFF
 		for(i = 0; i < n_sym; i++){
 			tile_set_cell(t->prev,  xmirror[i], ymirror[i], OFF);
 			tile_set_cell((tile *)t->auxdata,  xmirror[i], ymirror[i], OFF);
@@ -993,9 +1270,8 @@ found:
 		
 		g->prev->flags |= CHANGED;
 
-		RECURSE(("Recursing with (%d,%d) = OFF\n", x, y));
-		bellman_recurse(u, g->prev);
-#endif
+		PRINT_DIAGNOSTIC_RECURSE(("Recursing with (%d,%d) = OFF\n", x, y));
+		bellman_recurse(u, g->prev, first_gen_with_unknown_cells, first_next_sol_gen);
 		
 		for(i = 0; i < n_sym; i++){
 			tile_set_cell(t->prev,  xmirror[i], ymirror[i], UNKNOWN_STABLE);
@@ -1037,16 +1313,23 @@ int main(int argc, char *argv[]) {
         read_life105(f, read_cb, read_param_cb, NULL);
 
         fclose(f);
-
-        max_gens = last_encounter_gen + repair_interval + stable_interval + 2;
+        
+		if (!explicit_max_reactivation_gen)
+			max_reactivation_gen = max_first_activation_gen + DEFAULT_MIN_EXTRA_GENS_TO_ALLOW_REACTIVATION;
 		
+		// Lowest possible value is 2, 0 means this alternative accept condition is disabled
+		if (active_plus_inactive_gens_at_accept < 2)
+			active_plus_inactive_gens_at_accept = 0;
+
+        max_gens = max_reactivation_gen + max_active_gens_in_a_row + inactive_gens_at_accept;
+		if (active_plus_inactive_gens_at_accept)
+	        max_gens = lowest_of (max_gens, max_reactivation_gen + highest_of (max_active_gens_in_a_row + 1, active_plus_inactive_gens_at_accept));
+
 		if(max_gens < (u_filter->n_gens + 1))
 		{
 			max_gens = u_filter->n_gens + 1;
 		}
 		
-        n_live = 0;
-
         universe_evolve_next(u_static);
 
         unsigned int i;
@@ -1080,7 +1363,7 @@ int main(int argc, char *argv[]) {
                 if(t2) t->auxdata = t2;
                 t->filter = NULL;
         }
-
+		
         bellman_evolve_generations(u_evolving->first, max_gens);
 
         int ac_first, ac_last;
@@ -1088,11 +1371,17 @@ int main(int argc, char *argv[]) {
 
         switch(mode) {
         case SEARCH:
-                printf("max_gens: %d\n", max_gens);
-                bellman_choose_cells(u_evolving, u_evolving->first);
+				fprintf (stderr, "=== Bellman_szlim, v0.70 ===\n");
+				if (!verify_static_is_stable ())
+				{
+					fprintf (stderr, "Catalysts in input file are not stable!\n");
+					exit (-1);
+				}
+		
+                printf("  Starting search, max generations = %d\n", max_gens);
+                bellman_choose_cells(u_evolving, u_evolving->first, YES, 0, 0);
 
-                print_prune_counters();
-				getchar();
+                print_prune_counters(YES);
                 break;
 
         case CLASSIFY:
@@ -1203,4 +1492,3 @@ int main(int argc, char *argv[]) {
         }
         return 0;
 }
-
