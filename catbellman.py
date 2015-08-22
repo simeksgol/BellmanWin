@@ -5,6 +5,7 @@ def convbellman (text, stx, sty):
 	textln = text.split ('\n')
 	
 	gen = -1
+	glcnt = -1
 	y = sty;
 	for ln in textln:
 		if not ln:
@@ -12,6 +13,8 @@ def convbellman (text, stx, sty):
 		if ln [0] == '#':
 			if ln [0:35] == "#C Solution accepted at generation ":
 				gen = int (ln [35:])
+			elif ln [0:26] == "#C Glider count at accept ":
+				glcnt = int (ln [26:])
 		else:
 			x = stx;
 			for c in ln:
@@ -28,7 +31,7 @@ def convbellman (text, stx, sty):
 					g.setcell (x, y, 1)
 					x += 1;
 			y += 1
-	return gen
+	return (gen, glcnt)
 
 def clean (rect):
   for y in xrange (rect [1], rect [1] + rect [3]):
@@ -42,7 +45,10 @@ def addmarkers (rect):
   g.setcell (rect [0], rect [1] + rect [3] - 1, 1)
   g.setcell (rect [0] + rect [2] - 1, rect [1] + rect [3] - 1, 1)
 
-def analyse (gogen, minpop, maxpop, needgl):
+def analyse (gogen, glcnt, minpop, maxpop, mingl):
+  if glcnt < mingl:
+    return (False, 0)
+  
   g.run (gogen)
   inrect = g.getrect ()
   clean (inrect)
@@ -55,14 +61,6 @@ def analyse (gogen, minpop, maxpop, needgl):
   if rect == []:
     return (True, 0)
   else:
-    if needgl:
-      g.run (4)
-      newrect = g.getrect ()
-      clean (newrect)
-      newrect = g.getrect ()
-      if newrect == rect:
-        return (False, 0)
-
     addmarkers (inrect)
     return (True, g.hash (inrect))
 
@@ -73,16 +71,20 @@ def main ():
   path = g.getstring ("Output directory:")
   files = glob.glob (os.path.join (path, "*.out"))
 
-  minpops = g.getstring ("Min population except catalyzers:")
-  if minpops == "":
+  mingls = g.getstring ("Min number of gliders at accept:")
+  if mingls == "":
+    mingl = 0
     minpop = 0
     maxpop = 1024
-    needgl = False
   else:
-    minpop = int (minpops)
-    maxpop = int (g.getstring ("Max population except catalyzers:"))
-    ngl = g.getstring ("Require at least one escaping glider (y/n):")
-    needgl = ngl == 'y'
+    mingl = int (mingls)
+    minpops = g.getstring ("Min population except catalyzers:")
+    if minpops == "":
+      minpop = 0
+      maxpop = 1024
+    else:
+      minpop = int (minpops)
+      maxpop = int (g.getstring ("Max population except catalyzers:"))
 
   if g.getname () != "catbellman_temp":
     g.addlayer ()
@@ -107,11 +109,11 @@ def main ():
       if fix % 16 == 0:
         g.show ("Analysing " + str (fix) + "/" + str (len (files)))
 		
-      gogen = convbellman (filetext, 0, 0)
+      (gogen, glcnt) = convbellman (filetext, 0, 0)
       if gogen == -1:
 	    gogen = 128
 	  
-      (use, hash) = analyse (gogen, minpop, maxpop, needgl)
+      (use, hash) = analyse (gogen, glcnt, minpop, maxpop, mingl)
 
       if use:
         if not hash in hashdir:
