@@ -16,9 +16,12 @@
 static universe *u_static, *u_evolving, *u_forbidden, *u_filter;
 
 
+// Limits to use in buffer allocations
+#define MAX_ADDED_STATIC_ONCELLS 1024
+#define MAX_MAX_LOCAL_AREAS 16
+
 // Search settings:
 #define DEFAULT_MIN_EXTRA_GENS_TO_ALLOW_REACTIVATION 12
-#define MAX_MAX_LOCAL_AREAS 16
 #define LOCAL_COMPLEXITY_FREE_CELLS 4
 #define GLOBAL_COMPLEXITY_FREE_CELLS 9
 
@@ -58,9 +61,8 @@ static unsigned int max_gens;
 
 
 // List of currently added static on-cells
-#define ONLIST_SIZE 1024
-static int onlist_x [ONLIST_SIZE];
-static int onlist_y [ONLIST_SIZE];
+static int onlist_x [MAX_ADDED_STATIC_ONCELLS];
+static int onlist_y [MAX_ADDED_STATIC_ONCELLS];
 static int onlist_cnt = 0;
 
 
@@ -636,9 +638,87 @@ static void dump(int full, unsigned int gen_nr) {
         dumpcount++;
 }
 
-static void bellman_found_solution(unsigned int gens) {
+
+static int is_on_cell (const generation *g, int x, int y)
+{
+	const tile *t = generation_find_tile (g, x, y, NO);
+	if (!t)
+		return NO;
+	
+	return tile_get_cell (t, x, y) & 0x01;
+}
+
+static int glider_bits [] = {0x008f, 0x015a, 0x006b, 0x011e, 0x012e, 0x0073, 0x00a7, 0x0172, 0x01e2, 0x00b5, 0x01ac, 0x00f1, 0x00e9, 0x019c, 0x01ca, 0x009d};
+
+static int is_center_cell_of_glider (const generation *g, int x, int y)
+{
+	int bits = 0;
+	int xi;
+	int yi;
+
+	for (xi = x - 1; xi <= x + 1; xi++)
+		for (yi = y - 1; yi <= y + 1; yi++)
+			bits = (bits << 1) | is_on_cell (g, xi, yi);
+	
+	int gl_ix;
+	for (gl_ix = 0; gl_ix < 16; gl_ix++)
+		if (bits == glider_bits [gl_ix])
+		{
+			int bix;
+			for (bix = -2; bix < 2; bix++)
+				if (is_on_cell (g, x + bix, y - 2) || is_on_cell (g, x + bix + 1, y + 2) || is_on_cell (g, x - 2, y + bix + 1) || is_on_cell (g, x + 2, y + bix))
+					return NO;
+			
+			return YES;
+		}
+	
+	return NO;		
+}
+
+static int count_gliders (const generation *g)
+{
+	// Not very efficient, but only used for accepted solutions
+	int gl_cnt = 0;
+	
+	const tile *t;
+	for (t = g->all_first; t; t = t->all_next)
+	{
+		int xon;
+		int xoff;
+		int yon;
+		int yoff;
+		
+		tile_find_bounds (t, &xon, &xoff, &yon, &yoff);
+		if (xon <= xoff)
+		{
+			// A tile that contains the center cell of a glider will have an on-cell in that tile, at most one cell diagonally
+			// from it, but we need to limit the bounds to that of the tile, to not find a glider more than once
+			
+			// Change limits to first coordinate outside of bounds
+			xoff += 1;
+			yoff += 1;
+			
+			xon = highest_of (0, xon - 1) + t->xpos;
+			xoff = lowest_of (TILE_WIDTH, xoff + 1) + t->xpos;
+			yon = highest_of (0, yon - 1) + t->ypos;
+			yoff = lowest_of (TILE_HEIGHT, yoff + 1) + t->ypos;
+	
+			int x;
+			int y;
+
+			for (x = xon; x < xoff; x++)
+				for (y = yon; y < yoff; y++)
+					if (is_center_cell_of_glider (g, x, y))
+						gl_cnt++;
+		}
+	}
+	
+	return gl_cnt;
+}
+
+static void bellman_found_solution(unsigned int gens, int glider_count) {
         solcount++;
-        printf("--- Found solution %d, accepted at gen %d ---\n", solcount, gens);
+        printf("--- Found solution %d, accepted at gen %d (gliders: %d) ---\n", solcount, gens, glider_count);
 
         char name[30];
 
@@ -653,20 +733,21 @@ static void bellman_found_solution(unsigned int gens) {
         FILE *f = fopen(name, "w");
         if(f) {
 
-				fprintf(f, "#S min-activation-gen %d\n", min_activation_gen);
-				fprintf(f, "#S max-first-activation-gen %d\n", max_first_activation_gen);
-				fprintf(f, "#S max-reactivation-gen %d\n", max_reactivation_gen);
-				fprintf(f, "#S max-active-gens-in-a-row %d\n", max_active_gens_in_a_row);
-				fprintf(f, "#S inactive-gens-at-accept %d\n", inactive_gens_at_accept);
-				fprintf(f, "#S active-plus-inactive-gens-at-accept %d\n", active_plus_inactive_gens_at_accept);
-				fprintf(f, "#S continue-after-accept %d\n", continue_after_accept);
-				fprintf(f, "#S max-added-static-oncells %d\n", max_added_static_oncells);
-				fprintf(f, "#S max-flipped-cells-in-activation %d\n", max_flipped_cells_in_activation);
-				fprintf(f, "#S max-local-complexity %d\n", max_local_complexity);
-				fprintf(f, "#S max-local-areas %d\n", max_local_areas);
-				fprintf(f, "#S min-local-area-separation-squared %d\n", min_local_area_separation_squared);
-				fprintf(f, "#S max-global-complexity %d\n", max_global_complexity);
-				fprintf(f, "#C Solution accepted at generation %d\n", gens);
+				fprintf (f, "#S min-activation-gen %d\n", min_activation_gen);
+				fprintf (f, "#S max-first-activation-gen %d\n", max_first_activation_gen);
+				fprintf (f, "#S max-reactivation-gen %d\n", max_reactivation_gen);
+				fprintf (f, "#S max-active-gens-in-a-row %d\n", max_active_gens_in_a_row);
+				fprintf (f, "#S inactive-gens-at-accept %d\n", inactive_gens_at_accept);
+				fprintf (f, "#S active-plus-inactive-gens-at-accept %d\n", active_plus_inactive_gens_at_accept);
+				fprintf (f, "#S continue-after-accept %d\n", continue_after_accept);
+				fprintf (f, "#S max-added-static-oncells %d\n", max_added_static_oncells);
+				fprintf (f, "#S max-flipped-cells-in-activation %d\n", max_flipped_cells_in_activation);
+				fprintf (f, "#S max-local-complexity %d\n", max_local_complexity);
+				fprintf (f, "#S max-local-areas %d\n", max_local_areas);
+				fprintf (f, "#S min-local-area-separation-squared %d\n", min_local_area_separation_squared);
+				fprintf (f, "#S max-global-complexity %d\n", max_global_complexity);
+				fprintf (f, "#C Solution accepted at generation %d\n", gens);
+				fprintf (f, "#C Glider count at accept %d\n", glider_count);
 
                 for(t = u_static->first->all_first; t; t = t->all_next) {
                         tile *t2 = universe_find_tile(u_evolving, 0, t->xpos, t->ypos, 0);
@@ -717,7 +798,6 @@ static void bellman_choose_cells (universe *u, generation *g, int allow_new_once
 
 static void bellman_recurse (universe *u, generation *g, int previous_first_gen_with_unknown_cells, int first_next_sol_gen)
 {
-
 		int t_now = time(NULL);
         if((t_now - last_print_time) >= 10) {
 		        last_print_time = t_now;
@@ -871,7 +951,7 @@ static void bellman_recurse (universe *u, generation *g, int previous_first_gen_
 					
 					if (ge->gen == accept_gen && ge->gen >= first_next_sol_gen)
 					{
-						bellman_found_solution (ge->gen);
+						bellman_found_solution (ge->gen, count_gliders (ge));
 						// dump (1, 0);
           	            	        
 						if (continue_after_accept)
@@ -955,6 +1035,11 @@ static int xy_symmetry(int x, int y, int* mirrorx_arr, int* mirrory_arr)
 }
 
 
+static int distance_sq (int x1, int y1, int x2, int y2)
+{
+	return (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+}
+
 typedef enum {COMPLEXITY_OK, COMPLEXITY_FAILED_LOCALLY, COMPLEXITY_FAILED_GLOBALLY} compl_result;
 
 typedef struct
@@ -964,107 +1049,209 @@ typedef struct
 	int yon;
 	int yoff;
 	int oncnt;
+	int free_cells;
+	int compl_limit;
 } compl_box;
 
-static int init_compl_box (compl_box *cb)
+static void compl_box_init (compl_box *cb, int free_cells, int compl_limit)
 {
 	cb->xon = 0;
-	cb->xoff = -1;
+	cb->xoff = 0;
 	cb->yon = 0;
-	cb->yoff = -1;
+	cb->yoff = 0;
 	cb->oncnt = 0;
+	cb->free_cells = free_cells;
+	cb->compl_limit = compl_limit;
 }
 
-static int try_add_to_box (compl_box *cb, int x, int y, int compl_limit, int free_cells)
+static void compl_box_copy (const compl_box *src, compl_box *dest)
 {
-	int new_xon = cb->xon;
-	int new_xoff = cb->xoff;
-	int new_yon = cb->yon;
-	int new_yoff = cb->yoff;
-	int new_oncnt = cb->oncnt + 1;
-	
-	if (new_xon > new_xoff)
+	dest->xon = src->xon;
+	dest->xoff = src->xoff;
+	dest->yon = src->yon;
+	dest->yoff = src->yoff;
+	dest->oncnt = src->oncnt;
+	dest->free_cells = src->free_cells;
+	dest->compl_limit = src->compl_limit;
+}
+
+static void compl_box_add_cell (compl_box *cb, int x, int y)
+{
+	if (cb->oncnt == 0)
 	{
-		new_xon = x;
-		new_xoff = x + 1;
+		cb->xon = x;
+		cb->xoff = x + 1;
+		cb->yon = y;
+		cb->yoff = y + 1;
 	}
 	else
 	{
-		if (new_xon > x)
-			new_xon = x;
-		if (new_xoff < x + 1)
-			new_xoff = x + 1;
+		cb->xon = lowest_of (cb->xon, x);
+		cb->xoff = highest_of (cb->xoff, x + 1);
+		cb->yon = lowest_of (cb->yon, y);
+		cb->yoff = highest_of (cb->yoff, y + 1);
 	}
 
-	if (new_yon > new_yoff)
+	cb->oncnt++;
+}
+
+static int compl_box_cell_fits (const compl_box *cb, int x, int y)
+{
+	compl_box tempcb;
+	compl_box_copy (cb, &tempcb);
+	compl_box_add_cell (&tempcb, x, y);
+
+	int longside = highest_of (tempcb.xoff - tempcb.xon, tempcb.yoff - tempcb.yon);
+	int shortside = lowest_of (tempcb.xoff - tempcb.xon, tempcb.yoff - tempcb.yon);
+
+	return (2 * longside + shortside + highest_of (0, tempcb.oncnt - tempcb.free_cells)) <= tempcb.compl_limit;
+}
+
+
+static int compl_box_try_add_cell (compl_box *cb, int x, int y)
+{
+	if (compl_box_cell_fits (cb, x, y))
 	{
-		new_yon = y;
-		new_yoff = y + 1;
-	}
-	else
-	{
-		if (new_yon > y)
-			new_yon = y;
-		if (new_yoff < y + 1)
-			new_yoff = y + 1;
-	}
-	
-	int compl = new_oncnt - free_cells;
-	if (compl < 0)
-		compl = 0;
-            
-	int bigside = new_xoff - new_xon;
-	int shortside = new_yoff - new_yon;
-	if (bigside < shortside)
-	{
-		bigside = new_yoff - new_yon;
-		shortside = new_xoff - new_xon;
-	}
-	
-	compl += (2 * bigside + shortside);
-	
-	if (compl <= compl_limit)
-	{
-		cb->xon = new_xon;
-		cb->xoff = new_xoff;
-		cb->yon = new_yon;
-		cb->yoff = new_yoff;
-		cb->oncnt = new_oncnt;
+		compl_box_add_cell (cb, x, y);
 		return YES;
 	}
-	
-	return NO;
+	else
+		return NO;
 }
 
-static compl_result test_complexity ()
+static compl_box temp_box [MAX_MAX_LOCAL_AREAS];
+static int box_of_cell [MAX_ADDED_STATIC_ONCELLS];
+
+static compl_result test_complexity_overlapping_locals ()
 {
-	compl_box local_box [MAX_MAX_LOCAL_AREAS];
-	
 	int box_ix;
 	for (box_ix = 0; box_ix < max_local_areas; box_ix++)
-		init_compl_box (&local_box [box_ix]);
+		compl_box_init (&temp_box [box_ix], LOCAL_COMPLEXITY_FREE_CELLS, max_local_complexity);
 
 	int oncell_ix;
 	for (oncell_ix = 0; oncell_ix < onlist_cnt; oncell_ix++)
 	{
 		for (box_ix = 0; box_ix < max_local_areas; box_ix++)
-			if (try_add_to_box (&local_box [box_ix], onlist_x [oncell_ix], onlist_y [oncell_ix], max_local_complexity, LOCAL_COMPLEXITY_FREE_CELLS))
+			if (compl_box_try_add_cell (&temp_box [box_ix], onlist_x [oncell_ix], onlist_y [oncell_ix]))
 				break;
 		
 		if (box_ix == max_local_areas)
 			return COMPLEXITY_FAILED_LOCALLY;
 	}
 
-	compl_box global_box;
-	init_compl_box (&global_box);
+	return COMPLEXITY_OK;
+}
 
-	for (oncell_ix = 0; oncell_ix < onlist_cnt; oncell_ix++)
-		if (!try_add_to_box (&global_box, onlist_x [oncell_ix], onlist_y [oncell_ix], max_global_complexity, GLOBAL_COMPLEXITY_FREE_CELLS))
+static compl_result test_complexity_separate_locals ()
+{
+	// This is a semi-greedy approach. A cell that fits in an existing box, but isn't close enough to one of the existing cells in
+	// that box, that it must belong there, will be deferred. Only when we can't make progress any other way, such a cell will be
+	// added to an existing box. And we make new boxes only for cells that we know won't fit in an existing box
+
+	int cell_ix;
+	for (cell_ix = 0; cell_ix < onlist_cnt; cell_ix++)
+		box_of_cell [cell_ix] = -1;
+	
+	int box_cnt = 0;
+	int must_make_progress = NO;
+	
+	while (YES)
+	{
+		int all_done = YES;
+		int made_progress = NO;
+		
+		int obj_ix;
+		for (obj_ix = 0; obj_ix < onlist_cnt; obj_ix++)
+			if (box_of_cell [obj_ix] == -1)
+			{
+				int box_where_cell_must_belong = -1;
+				int ref_ix;
+				
+				for (ref_ix = 0; ref_ix < onlist_cnt; ref_ix++)
+					if (box_of_cell [ref_ix] != -1)
+					{
+						int dist_sq = distance_sq (onlist_x [obj_ix], onlist_y [obj_ix], onlist_x [ref_ix], onlist_y [ref_ix]);
+						if (dist_sq < min_local_area_separation_squared)
+							if (box_where_cell_must_belong == -1)
+								box_where_cell_must_belong = box_of_cell [ref_ix];
+							else if (box_of_cell [ref_ix] != box_where_cell_must_belong)
+								return COMPLEXITY_FAILED_LOCALLY;
+					}
+				
+				if (box_where_cell_must_belong != -1)
+				{
+					if (!compl_box_try_add_cell (&temp_box [box_where_cell_must_belong], onlist_x [obj_ix], onlist_y [obj_ix]))
+						return COMPLEXITY_FAILED_LOCALLY;
+					
+					box_of_cell [obj_ix] = box_where_cell_must_belong;
+					made_progress = YES;
+				}
+				else
+				{
+					int first_box_where_cell_fits = -1;
+					int box_ix;
+					
+					for (box_ix = 0; box_ix < box_cnt; box_ix++)
+						if (compl_box_cell_fits (&temp_box [box_ix], onlist_x [obj_ix], onlist_y [obj_ix]))
+						{
+							first_box_where_cell_fits = box_ix;
+							break;
+						}
+						
+					if (first_box_where_cell_fits == -1)
+					{
+						if (box_cnt >= max_local_areas)
+							return COMPLEXITY_FAILED_LOCALLY;
+						
+						compl_box_init (&temp_box [box_cnt], LOCAL_COMPLEXITY_FREE_CELLS, max_local_complexity);
+						if (!compl_box_try_add_cell (&temp_box [box_cnt], onlist_x [obj_ix], onlist_y [obj_ix]))
+							return COMPLEXITY_FAILED_LOCALLY;
+						
+						box_of_cell [obj_ix] = box_cnt;
+						box_cnt++;
+						made_progress = YES;
+					}
+					else if (must_make_progress)
+					{
+						compl_box_add_cell (&temp_box [first_box_where_cell_fits], onlist_x [obj_ix], onlist_y [obj_ix]);
+						box_of_cell [obj_ix] = first_box_where_cell_fits;
+
+						all_done = NO;
+						made_progress = YES;
+						break;
+					}
+					else
+						all_done = NO;
+				}
+			}
+		
+		if (all_done)
+			return COMPLEXITY_OK;
+
+		must_make_progress = (made_progress == NO);
+	}
+}
+
+static compl_result test_complexity ()
+{
+	compl_result loc_result;
+	if (min_local_area_separation_squared < 4 || max_local_areas == 1)
+		loc_result = test_complexity_overlapping_locals ();
+	else
+		loc_result = test_complexity_separate_locals ();
+	
+	if (loc_result != COMPLEXITY_OK)
+		return loc_result;
+
+	compl_box_init (&temp_box [0], GLOBAL_COMPLEXITY_FREE_CELLS, max_global_complexity);
+	
+	int cell_ix;
+	for (cell_ix = 0; cell_ix < onlist_cnt; cell_ix++)
+		if (!compl_box_try_add_cell (&temp_box [0], onlist_x [cell_ix], onlist_y [cell_ix]))
 			return COMPLEXITY_FAILED_GLOBALLY;
 	
 	return COMPLEXITY_OK;
 }
-
 
 static void bellman_choose_cells (universe *u, generation *g, int allow_new_oncells, int first_gen_with_unknown_cells, int first_next_sol_gen)
 {
@@ -1221,7 +1408,7 @@ found:
 		if (allow_new_oncells)
 		{
 			if(onlist_cnt + n_sym <= max_added_static_oncells) {
-    	        if (onlist_cnt + n_sym > ONLIST_SIZE)
+    	        if (onlist_cnt + n_sym > MAX_ADDED_STATIC_ONCELLS)
 				{
 					printf("On-cell list overflow\n");
 					assert(0);
@@ -1371,7 +1558,7 @@ int main(int argc, char *argv[]) {
 
         switch(mode) {
         case SEARCH:
-				fprintf (stderr, "=== Bellman_szlim, v0.70 ===\n");
+				fprintf (stderr, "=== Bellman_szlim, v0.71 ===\n");
 				if (!verify_static_is_stable ())
 				{
 					fprintf (stderr, "Catalysts in input file are not stable!\n");
