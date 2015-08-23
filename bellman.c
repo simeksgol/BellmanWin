@@ -789,7 +789,7 @@ static void bellman_found_solution (unsigned int accept_gen, int max_activated, 
 				fprintf (f, "#C Solution accepted at generation %d\n", accept_gen);
 				fprintf (f, "#C Activations at generation ");
 				print_activation_gens (f, act_count, act_gen);
-				fprintf (f, "#C Max activated cells ", max_activated);
+				fprintf (f, "#C Max activated cells %d\n", max_activated);
 				fprintf (f, "#C Glider count at accept %d\n", glider_count);
 
                 for(t = u_static->first->all_first; t; t = t->all_next) {
