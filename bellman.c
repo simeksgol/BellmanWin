@@ -14,7 +14,7 @@
 #define YES 1
 #define NO 0
 
-#define version_string "v0.72"
+#define version_string "v0.73"
 
 // Remember this unexpected condition but let the search continue:
 got_to_end_of_pattern = NO;
