@@ -300,7 +300,7 @@ evolve_result tile_stabilise_3state(tile *t, tile *out) {
         // and the unknown bits
         full_adder(uputotal, up_unk_total0, up_unk_total1, up_unk_left, up_unk, up_unk_right);
         full_adder(midutotal, mid_unk_total0, mid_unk_total1, mid_unk_left, mid_unk, mid_unk_right);
-
+		
         for(y=0; y<TILE_HEIGHT; y++) {
                 if(y == TILE_HEIGHT-1) {
                         if(t->down) {

@@ -4,15 +4,16 @@
 #include "universe.h"
 #include "readwrite.h"
 
-void read_life105(FILE *f, 
-                  void (*cb)(void *, char, int, int, int, char), 
-                  void (*paramcb)(void *, const char *, const char *),
-                  void *cbdata) {
+
+int read_life105(FILE *f, 
+                 void (*cb)(void *, char, int, int, int, char), 
+                 void (*paramcb)(void *, const char *, const char *),
+                 void *cbdata) {
 
         char linebuff[10000];        
-        char parambuff[50];
-        char valuebuff[50];
-        int gen, xpos, ypos, value;
+        char parambuff[63 + 1];
+        char valuebuff[63 + 1];
+        int gen, xpos, ypos;
         char area = 'P';
 
         while(fgets(linebuff, sizeof linebuff, f)) {
@@ -31,6 +32,10 @@ void read_life105(FILE *f,
                         // description; ignore
                         break;
 
+                case 'C': 
+                        // comment; ignore
+                        break;
+
                 case 'N':
                         // use normal Life rules
                         break;
@@ -40,8 +45,8 @@ void read_life105(FILE *f,
                         area = 'P';
                         gen = 0;
                         if(sscanf(linebuff + 2, "%d %d", &xpos, &ypos) != 2) {
-                                fprintf(stderr, "Bad line: %s\n", linebuff);
-                                return;
+                                fprintf(stderr, "Bad pattern header: '%s'\n", linebuff);
+                                return 0;
                         }
                         break;
 
@@ -49,23 +54,23 @@ void read_life105(FILE *f,
                         // set co-ordinates
                         area = 'F';
                         if(sscanf(linebuff + 2, "%d %d %d", &gen, &xpos, &ypos) != 3) {
-                                fprintf(stderr, "Bad line: %s\n", linebuff);
-                                return;
+                                fprintf(stderr, "Bad filter header: '%s'\n", linebuff);
+                                return 0;
                         }
                         break;
 
                 case 'S':
                         // search space control parameter
-                        if(sscanf(linebuff + 2, "%s %s", parambuff, valuebuff) != 2) {
-                                fprintf(stderr, "Bad line: %s\n", linebuff);
-                                return;
+                        if(sscanf(linebuff + 2, "%63s %63s", parambuff, valuebuff) != 2) {
+                                fprintf(stderr, "Bad search parameter line: '%s'\n", linebuff);
+                                return 0;
                         }
                         if(paramcb)
                                 paramcb(cbdata, parambuff, valuebuff);
                         break;
 
                 default:
-                        fprintf(stderr, "Unknown line: %s\n", linebuff);
+                        fprintf(stderr, "--- Unknown line: '%s'\n", linebuff);
                         break;
 
                 } else {
@@ -79,6 +84,8 @@ void read_life105(FILE *f,
                         ypos++;
                 }
         }
+		
+		return 1;
 }
 
 static void life105cb(void *u_, char area, int gen, int x, int y, char c) {

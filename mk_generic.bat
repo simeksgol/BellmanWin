@@ -1,0 +1,1 @@
+gcc.exe bellman.c evolve_bitwise.c lib.c readfile.c textconv.c universe.c writefile.c -o bellman_szlim_074_generic.exe -O3 -Wall -Wextra -fno-stack-protector -fomit-frame-pointer -march=core2 -mtune=intel
