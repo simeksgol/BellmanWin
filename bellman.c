@@ -47,6 +47,7 @@ static const char *PARM_MAX_LOCAL_RECTS =			"max-local-rects";
 static const char *PARM_MIN_RECT_SEPARATION_SQ =	"min-rect-separation-squared";
 static const char *PARM_MAX_GLOBAL_COMPL =			"max-global-complexity";
 static const char *PARM_NEW_RESULT_NAMING =			"new-result-naming";
+static const char *PARM_MAX_RESULTS =				"max-results";
 
 static const char *PARM_SYM_HORZ_ODD =				"symmetry-horiz-odd";
 static const char *PARM_SYM_HORZ_EVEN =				"symmetry-horiz-even";
@@ -106,6 +107,7 @@ static int max_local_rects = PARM_NOT_SET;
 static int min_rect_separation_sq = PARM_NOT_SET;
 static int max_global_compl = PARM_NOT_SET;
 static int new_result_naming = PARM_NOT_SET;
+static int max_results = PARM_NOT_SET;
 
 // Symmetry constraints
 static enum {
@@ -414,6 +416,7 @@ static void read_param_cb(void *u_, const char *param, const char *value) {
 	match |= match_parameter (PARM_MIN_RECT_SEPARATION_SQ, param, value, 0, 524287, &min_rect_separation_sq);
 	match |= match_parameter (PARM_MAX_GLOBAL_COMPL, param, value, 0, 2047, &max_global_compl);
 	match |= match_parameter (PARM_NEW_RESULT_NAMING, param, value, 0, 1, &new_result_naming);
+	match |= match_parameter (PARM_MAX_RESULTS, param, value, 0, 1048575, &max_results);
 	
 	if(!strcmp(param, PARM_SYM_HORZ_ODD)) {
 		coord = strtol(value, NULL, 10);
@@ -600,6 +603,9 @@ static int verify_and_fix_parameters ()
 	
 	if (new_result_naming == PARM_NOT_SET || new_result_naming == PARM_DISABLED)
 		new_result_naming = 0;
+	
+	if (max_results == PARM_NOT_SET)
+		max_results = PARM_DISABLED;
 	
 	return YES;
 }	
@@ -1028,6 +1034,7 @@ static void bellman_found_solution (int accept_gen, int max_active, int glider_c
 		fprintf (f, "#S %s %d\n", PARM_MIN_RECT_SEPARATION_SQ, min_rect_separation_sq);
 		fprintf (f, "#S %s %d\n", PARM_MAX_GLOBAL_COMPL, max_global_compl);
 		fprintf (f, "#S %s %d\n", PARM_NEW_RESULT_NAMING, new_result_naming);
+		fprintf (f, "#S %s %d\n", PARM_MAX_RESULTS, max_results);
 
 		if (symmetry_type == HORIZ)
 			if (symmetry_ofs & 0x00000001)
@@ -1132,7 +1139,7 @@ typedef enum {PHASE_NOT_ACTIVATED_YET, PHASE_ACTIVE, PHASE_RESTORED_NOT_YIELDED,
 
 static int activation_gen [MAX_LISTED_ACTIVATIONS];
 
-static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, int previous_first_gen_with_unknown_cells, int first_next_sol_gen)
+static int bellman_recurse (universe *u, generation *g, int allow_new_oncells, int previous_first_gen_with_unknown_cells, int first_next_sol_gen)
 {
 	print_prune_counters (NO);
 		
@@ -1141,12 +1148,12 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 	if (!verify_static_is_stable ())
 	{
 		prune_unstable++;
-		return;
+		return YES;
 	}
 	
 // REINTRODUCTION OF FIXED CATALYSTS
 //	if (!ver_cats (g))
-//		return;
+//		return YES;
 	
 	// Evolve any changes up to previous first gen with unknown cells
 	generation *ge;
@@ -1197,7 +1204,7 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 			if (phase == PHASE_NOT_ACTIVATED_YET && (gen > max_first_act_gen || (strictly_gen_by_gen && gen > current_single_gen)))
 			{
 				prune_no_acty_in_time++;
-				return;
+				return YES;
 			}
 			
 			// Check for first activation
@@ -1207,7 +1214,7 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 				if (gen < min_first_act_gen || (strictly_gen_by_gen && gen < current_single_gen))
 				{
 					prune_first_acty_too_early++;
-					return;
+					return YES;
 				}
 				else
 				{
@@ -1228,7 +1235,7 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 			if (max_act_cells != PARM_DISABLED && (int) ge->n_active > max_act_cells)
 			{
 				prune_too_many_act_cells++;
-				return;
+				return YES;
 			}
 			
 			max_n_active = highest_of (max_n_active, ge->n_active);
@@ -1268,7 +1275,7 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 				else
 					prune_acty_too_late++;
 				
-				return;
+				return YES;
 			}
 			
 			// Note that if support is re-added for evaluating patterns with unknown evolving cells, this needs to be qualified with having no such cells
@@ -1279,20 +1286,20 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 					prune_explicit_filter_filtered++;
 				else
 					prune_explicit_filter_prune++;
-				return;
+				return YES;
 			}
 			
 			if (ge->flags & IN_FORBIDDEN_REGION)
 			{
 				prune_forbidden++;
-				return;
+				return YES;
 			}
 			
 			// Check if an ongoing activation has lasted too long without break
 			if (max_cons_act_gens != PARM_DISABLED && phase == PHASE_ACTIVE && gen > current_actn_first_gen + max_cons_act_gens + 1)
 			{
 				prune_cons_acty_too_long++;
-				return;
+				return YES;
 			}
 			
 			// Check if all conditions for a solution are met
@@ -1317,7 +1324,7 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 					if (cont_after_accept)
 						first_next_sol_gen = gen + 1;
 					else
-						return;
+						return YES;
 				}
 			}
 			
@@ -1325,7 +1332,7 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 			if (gen > last_allowed_act_gen && phase == PHASE_RESTORED_YIELDED)
 			{
 				prune_no_cont_found++;
-				return;
+				return YES;
 			}
 			
 			// Stop adding new on-cells when it's too late to start a new activation and there is currently no ongoing activation
@@ -1335,7 +1342,11 @@ static void bellman_recurse (universe *u, generation *g, int allow_new_oncells, 
 		}
 	}
 	
+	if (max_results != PARM_DISABLED && solcount >= max_results)
+		return NO;
+	
 	bellman_choose_cells(u, g, allow_new_oncells, ge->gen, first_next_sol_gen);
+	return YES;
 }
 
 #define TRY(cdx, cdy)																										\
@@ -1919,7 +1930,8 @@ int main(int argc, char *argv[]) {
 					last_new_gen_time = time (NULL);
 					printf ("\n--- Starting generation %d\n", sg);
 					current_single_gen = sg;
-					bellman_recurse (u_evolving, u_evolving->first, YES, 0, 0);
+					if (!bellman_recurse (u_evolving, u_evolving->first, YES, 0, 0))
+						break;
 				}
 			}
 			else
@@ -1937,6 +1949,10 @@ int main(int argc, char *argv[]) {
 				fprintf (stderr, "=== Please report this as a bug!\n");
 				fprintf (stderr, "=== Supply the input file and state the version number ""%s""\n\n", version_string);
 			}
+			
+			if (max_results != PARM_DISABLED && solcount >= max_results)
+				fprintf (stderr, "\n--- Interrupted because max allowed number of solutions was reached\n");
+			
 			break;
 			
 		case CLASSIFY:

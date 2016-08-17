@@ -17,6 +17,7 @@
 #S min-rect-separation-squared 8
 #S max-global-complexity 40
 #S new-result-naming -1
+#S max-results 100000
 #P 0 0
 ................................................................
 ................................................................
